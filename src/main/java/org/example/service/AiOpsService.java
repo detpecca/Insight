@@ -71,10 +71,13 @@ public class AiOpsService {
     }
 
     /**
-     * 从执行结果中提取最终报告文本
+     * 从执行结果中提取最终报告文本。
+     * Planner 同时承担 Replanner 角色，planner_plan 每轮都会被覆盖，
+     * 因此这里必须校验最后一次的输出确实是"报告格式"（而不是中间的 JSON 决策），
+     * 否则宁可返回空让上层走兜底提示。
      *
      * @param state 执行状态
-     * @return 报告文本（如果存在）
+     * @return 报告文本（如果存在且格式合法）
      */
     public Optional<String> extractFinalReport(OverAllState state) {
         logger.info("开始提取最终报告...");
@@ -84,14 +87,49 @@ public class AiOpsService {
                 .filter(AssistantMessage.class::isInstance)
                 .map(AssistantMessage.class::cast);
 
-        if (plannerFinalOutput.isPresent()) {
-            String reportText = plannerFinalOutput.get().getText();
-            logger.info("成功提取到 Planner 最终报告，长度: {}", reportText.length());
-            return Optional.of(reportText);
-        } else {
+        if (plannerFinalOutput.isEmpty()) {
             logger.warn("未能提取到 Planner 最终报告");
             return Optional.empty();
         }
+
+        String reportText = plannerFinalOutput.get().getText();
+        String normalized = normalizeReport(reportText);
+        if (normalized == null) {
+            logger.warn("Planner 最终输出不是合法的报告格式（可能被中间 JSON 决策覆盖），长度: {}",
+                    reportText == null ? 0 : reportText.length());
+            return Optional.empty();
+        }
+
+        logger.info("成功提取到 Planner 最终报告，长度: {}", normalized.length());
+        return Optional.of(normalized);
+    }
+
+    /**
+     * 报告格式校验与归一化：
+     * - 允许模型把报告包在 ```markdown 代码围栏里，自动剥离；
+     * - 剥离后必须以 "# 告警分析报告" 开头，否则视为非法输出。
+     *
+     * @return 合法的报告文本；非法时返回 null。包级可见以便单元测试。
+     */
+    static String normalizeReport(String reportText) {
+        if (reportText == null) {
+            return null;
+        }
+        String text = reportText.strip();
+        if (text.startsWith("```")) {
+            int firstNewline = text.indexOf('\n');
+            if (firstNewline > 0) {
+                text = text.substring(firstNewline + 1);
+            }
+            if (text.endsWith("```")) {
+                text = text.substring(0, text.length() - 3);
+            }
+            text = text.strip();
+        }
+        if (!text.startsWith("# 告警分析报告")) {
+            return null;
+        }
+        return text;
     }
 
     /**

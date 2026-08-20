@@ -1,8 +1,11 @@
 package org.example.controller;
 
-import org.example.config.FileUploadConfig;
+import org.example.dto.ApiResponse;
 import org.example.dto.FileUploadRes;
+import org.example.exception.BusinessException;
+import org.example.config.FileUploadConfig;
 import org.example.service.VectorIndexService;
+import org.example.util.SafePaths;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -32,51 +35,55 @@ public class FileUploadController {
     private VectorIndexService vectorIndexService;
 
     @PostMapping(value = "/api/upload", consumes = "multipart/form-data")
-    public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) {
+    public ResponseEntity<ApiResponse<FileUploadRes>> upload(@RequestParam("file") MultipartFile file) {
         if (file.isEmpty()) {
-            return ResponseEntity.badRequest().body("文件不能为空");
+            return ResponseEntity.badRequest().body(ApiResponse.error(400, "文件不能为空"));
         }
 
         String originalFilename = file.getOriginalFilename();
         if (originalFilename == null || originalFilename.isEmpty()) {
-            return ResponseEntity.badRequest().body("文件名不能为空");
+            return ResponseEntity.badRequest().body(ApiResponse.error(400, "文件名不能为空"));
         }
 
         String fileExtension = getFileExtension(originalFilename);
         if (!isAllowedExtension(fileExtension)) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body("不支持的文件格式，仅支持: " + fileUploadConfig.getAllowedExtensions());
+                    .body(ApiResponse.error(400, "不支持的文件格式，仅支持: " + fileUploadConfig.getAllowedExtensions()));
         }
 
         try {
+            // 安全解析目标路径：只取文件名部分，且必须仍落在上传目录内，
+            // 防止 "../xxx" 这类路径穿越导致目录外文件被删除/覆盖（见 SafePaths 及其测试）
             String uploadPath = fileUploadConfig.getPath();
-            Path uploadDir = Paths.get(uploadPath).normalize();
+            Path uploadDir = Paths.get(uploadPath).toAbsolutePath().normalize();
             if (!Files.exists(uploadDir)) {
                 Files.createDirectories(uploadDir);
             }
+            Path filePath = SafePaths.resolveInside(uploadDir, originalFilename).orElse(null);
+            if (filePath == null) {
+                logger.warn("拒绝疑似路径穿越的上传请求: {}", originalFilename);
+                return ResponseEntity.badRequest().body(ApiResponse.error(400, "非法文件名"));
+            }
 
-            // 使用原始文件名，而不是UUID，以便实现基于文件名的去重
-            Path filePath = uploadDir.resolve(originalFilename).normalize();
-            
             // 如果文件已存在，先删除旧文件（实现覆盖更新）
             if (Files.exists(filePath)) {
                 logger.info("文件已存在，将覆盖: {}", filePath);
                 Files.delete(filePath);
             }
-            
-            Files.copy(file.getInputStream(), filePath);
 
+            Files.copy(file.getInputStream(), filePath);
             logger.info("文件上传成功: {}", filePath);
 
-            // 文件上传成功后，自动调用向量索引服务
+            // 文件上传成功后，自动调用向量索引服务；
+            // 索引失败时明确返回错误（文件保留在磁盘，可重试），而不是静默"成功"
             try {
                 logger.info("开始为上传文件创建向量索引: {}", filePath);
                 vectorIndexService.indexSingleFile(filePath.toString());
                 logger.info("向量索引创建成功: {}", filePath);
             } catch (Exception e) {
-                logger.error("向量索引创建失败: {}, 错误: {}", filePath, e.getMessage(), e);
-                // 注意：即使索引失败，文件上传仍然成功，只是记录错误日志
-                // 可以根据业务需求决定是否要删除文件或返回错误
+                logger.error("向量索引创建失败: {}", filePath, e);
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body(ApiResponse.error(500, "文件已保存，但知识库索引失败，请重试"));
             }
 
             FileUploadRes response = new FileUploadRes(
@@ -84,54 +91,11 @@ public class FileUploadController {
                     filePath.toString(),
                     file.getSize()
             );
-
-            // 使用统一的API响应格式
-            ApiResponse<FileUploadRes> apiResponse = new ApiResponse<>();
-            apiResponse.setCode(200);
-            apiResponse.setMessage("success");
-            apiResponse.setData(response);
-            
-            return ResponseEntity.ok(apiResponse);
+            return ResponseEntity.ok(ApiResponse.success(response));
 
         } catch (IOException e) {
-            ApiResponse<String> errorResponse = new ApiResponse<>();
-            errorResponse.setCode(500);
-            errorResponse.setMessage("文件上传失败: " + e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(errorResponse);
-        }
-    }
-
-    /**
-     * 统一 API 响应格式
-     */
-    public static class ApiResponse<T> {
-        private int code;
-        private String message;
-        private T data;
-
-        public int getCode() {
-            return code;
-        }
-
-        public void setCode(int code) {
-            this.code = code;
-        }
-
-        public String getMessage() {
-            return message;
-        }
-
-        public void setMessage(String message) {
-            this.message = message;
-        }
-
-        public T getData() {
-            return data;
-        }
-
-        public void setData(T data) {
-            this.data = data;
+            logger.error("文件上传失败: {}", originalFilename, e);
+            throw BusinessException.internal("文件保存失败，请重试");
         }
     }
 

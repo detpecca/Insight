@@ -3,10 +3,8 @@ package org.example.service;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.MutationResult;
 import io.milvus.param.R;
-import io.milvus.param.RpcStatus;
-import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.DeleteParam;
-import io.milvus.param.dml.InsertParam;
+import io.milvus.param.dml.UpsertParam;
 import lombok.Getter;
 import lombok.Setter;
 import org.example.constant.MilvusConstants;
@@ -143,33 +141,50 @@ public class VectorIndexService {
         List<DocumentChunk> chunks = chunkService.chunkDocument(content, path.toString());
         logger.info("文档分片完成: {} -> {} 个分片", filePath, chunks.size());
 
-        // 4. 为每个分片生成向量并插入 Milvus
+        if (chunks.isEmpty()) {
+            logger.warn("文档分片结果为空，跳过索引: {}", filePath);
+            return;
+        }
+
+        // 4. 为所有分片生成向量（逐条调用 embedding API），然后一次性批量写入 Milvus
+        List<String> ids = new ArrayList<>(chunks.size());
+        List<String> contents = new ArrayList<>(chunks.size());
+        List<List<Float>> vectors = new ArrayList<>(chunks.size());
+        List<com.google.gson.JsonObject> metadataJsons = new ArrayList<>(chunks.size());
+
         for (int i = 0; i < chunks.size(); i++) {
             DocumentChunk chunk = chunks.get(i);
-            
             try {
-                // 生成向量
                 List<Float> vector = embeddingService.generateEmbedding(chunk.getContent());
-
-                // 构建元数据（包含文件信息）
                 Map<String, Object> metadata = buildMetadata(path.toString(), chunk, chunks.size());
 
-                // 插入到 Milvus
-                insertToMilvus(chunk.getContent(), vector, metadata, chunk.getChunkIndex());
-                
-                logger.info("✓ 分片 {}/{} 索引成功", i + 1, chunks.size());
+                // 确定性 ID：_source + 分片索引，保证重复索引时按主键覆盖而不是产生重复行
+                String source = (String) metadata.get("_source");
+                String id = UUID.nameUUIDFromBytes((source + "_" + chunk.getChunkIndex()).getBytes()).toString();
 
+                com.google.gson.Gson gson = new com.google.gson.Gson();
+                ids.add(id);
+                contents.add(chunk.getContent());
+                vectors.add(vector);
+                metadataJsons.add(gson.toJsonTree(metadata).getAsJsonObject());
             } catch (Exception e) {
-                logger.error("✗ 分片 {}/{} 索引失败", i + 1, chunks.size(), e);
+                logger.error("✗ 分片 {}/{} 处理失败", i + 1, chunks.size(), e);
                 throw new RuntimeException("分片索引失败: " + e.getMessage(), e);
             }
         }
 
-        logger.info("文件索引完成: {}, 共 {} 个分片", filePath, chunks.size());
+        try {
+            int upserted = batchUpsert(ids, contents, vectors, metadataJsons);
+            logger.info("文件索引完成: {}, 共 {} 个分片, 写入 {} 条向量", filePath, chunks.size(), upserted);
+        } catch (Exception e) {
+            logger.error("批量写入 Milvus 失败: {}", filePath, e);
+            throw new RuntimeException("批量写入 Milvus 失败: " + e.getMessage(), e);
+        }
     }
 
     /**
      * 删除文件的旧数据（根据 metadata._source）
+     * collection 已在应用启动时统一加载（见 MilvusClientFactory），此处无需重复加载。
      */
     private void deleteExistingData(String filePath) {
         try {
@@ -177,24 +192,11 @@ public class VectorIndexService {
             // 将系统路径转换为统一格式
             Path path = Paths.get(filePath).normalize();
             String normalizedPath = path.toString().replace(File.separator, "/");
-            
+
             // 构建删除表达式：metadata["_source"] == "xxx"
             String expr = String.format("metadata[\"_source\"] == \"%s\"", normalizedPath);
-            
+
             logger.info("准备删除旧数据，路径: {}, 表达式: {}", normalizedPath, expr);
-
-            // 确保 collection 已加载（删除操作需要集合已加载）
-            R<RpcStatus> loadResponse = milvusClient.loadCollection(
-                LoadCollectionParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                    .build()
-            );
-
-            // 状态码 65535 表示集合已经加载，这不是错误
-            if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
-                logger.warn("加载 collection 失败: {}", loadResponse.getMessage());
-                return;
-            }
 
             DeleteParam deleteParam = DeleteParam.newBuilder()
                     .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
@@ -251,62 +253,37 @@ public class VectorIndexService {
     }
 
     /**
-     * 插入向量到 Milvus
+     * 批量 upsert 向量到 Milvus（单次 RPC）。
+     * 相比旧的逐条 insert：
+     * 1. 一次 RPC 完成，减少网络往返；
+     * 2. upsert 按主键覆盖，配合确定性 ID（_source + chunkIndex），
+     *    重复索引同一文件不会产生重复数据，也规避了 delete 异步生效带来的竞态。
+     * collection 已在应用启动时统一加载（见 MilvusClientFactory）。
+     *
+     * @return 写入的记录数
      */
-    private void insertToMilvus(String content, List<Float> vector, 
-                                Map<String, Object> metadata, int chunkIndex) throws Exception {
-        try {
-            // 确保 collection 已加载
-            R<RpcStatus> loadResponse = milvusClient.loadCollection(
-                LoadCollectionParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                    .build()
-            );
+    private int batchUpsert(List<String> ids, List<String> contents,
+                            List<List<Float>> vectors, List<com.google.gson.JsonObject> metadataJsons) {
+        List<UpsertParam.Field> fields = new ArrayList<>();
+        fields.add(new UpsertParam.Field("id", ids));
+        fields.add(new UpsertParam.Field("content", contents));
+        fields.add(new UpsertParam.Field("vector", vectors));
+        fields.add(new UpsertParam.Field("metadata", metadataJsons));
 
-            if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
-                throw new RuntimeException("加载 collection 失败: " + loadResponse.getMessage());
-            }
+        UpsertParam upsertParam = UpsertParam.newBuilder()
+                .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                .withFields(fields)
+                .build();
 
-            // 生成唯一 ID（使用 _source + 分片索引）
-            String source = (String) metadata.get("_source");
-            String id = UUID.nameUUIDFromBytes((source + "_" + chunkIndex).getBytes()).toString();
+        R<MutationResult> response = milvusClient.upsert(upsertParam);
 
-            // 构建字段数据
-            List<InsertParam.Field> fields = new ArrayList<>();
-            
-            // ID 字段
-            fields.add(new InsertParam.Field("id", Collections.singletonList(id)));
-            
-            // content 字段
-            fields.add(new InsertParam.Field("content", Collections.singletonList(content)));
-            
-            // vector 字段
-            fields.add(new InsertParam.Field("vector", Collections.singletonList(vector)));
-            
-            // metadata 字段（JSON 对象）
-            com.google.gson.Gson gson = new com.google.gson.Gson();
-            com.google.gson.JsonObject metadataJson = gson.toJsonTree(metadata).getAsJsonObject();
-            fields.add(new InsertParam.Field("metadata", Collections.singletonList(metadataJson)));
-
-            // 构建插入参数
-            InsertParam insertParam = InsertParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                    .withFields(fields)
-                    .build();
-
-            // 执行插入
-            R<MutationResult> insertResponse = milvusClient.insert(insertParam);
-
-            if (insertResponse.getStatus() != 0) {
-                throw new RuntimeException("插入向量失败: " + insertResponse.getMessage());
-            }
-
-            logger.debug("向量插入成功: id={}, source={}, chunk={}", id, source, chunkIndex);
-
-        } catch (Exception e) {
-            logger.error("插入向量到 Milvus 失败", e);
-            throw e;
+        if (response.getStatus() != 0) {
+            throw new RuntimeException("upsert 向量失败: " + response.getMessage());
         }
+
+        long count = response.getData().getUpsertCnt();
+        logger.info("批量 upsert 完成, 请求 {} 条, 实际 {} 条", ids.size(), count);
+        return (int) count;
     }
 
     /**

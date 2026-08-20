@@ -6,7 +6,6 @@ import com.alibaba.dashscope.embeddings.TextEmbeddingResult;
 import com.alibaba.dashscope.embeddings.TextEmbeddingOutput;
 import com.alibaba.dashscope.embeddings.TextEmbeddingResultItem;
 import com.alibaba.dashscope.exception.NoApiKeyException;
-import com.alibaba.dashscope.utils.Constants;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,30 +38,21 @@ public class VectorEmbeddingService {
     public void init() {
         // 验证 API Key
         if (apiKey == null || apiKey.trim().isEmpty() || apiKey.equals("your-api-key-here")) {
-            logger.error("API Key 未正确配置！当前值: {}", apiKey);
-            throw new IllegalStateException("请设置环境变量 DASHSCOPE_API_KEY 或在 application.yml 中配置正确的 API Key");
+            logger.error("API Key 未正确配置！请设置环境变量 DASHSCOPE_API_KEY");
+            throw new IllegalStateException("请设置环境变量 DASHSCOPE_API_KEY");
         }
-        
+
         // 打印 API Key 前缀用于调试（不打印完整 Key 保证安全）
-        String maskedKey = apiKey.length() > 8 ? 
-            apiKey.substring(0, 8) + "..." + apiKey.substring(apiKey.length() - 4) : 
+        String maskedKey = apiKey.length() > 8 ?
+            apiKey.substring(0, 8) + "..." + apiKey.substring(apiKey.length() - 4) :
             "***";
         logger.info("API Key 已加载: {}", maskedKey);
-        
-        // 设置全局 API Key（确保设置成功）
-        Constants.apiKey = apiKey;
-        
-        // 验证 API Key 是否设置成功
-        if (Constants.apiKey == null || Constants.apiKey.isEmpty()) {
-            logger.error("Constants.apiKey 设置失败！");
-            throw new IllegalStateException("API Key 设置到 Constants 失败");
-        }
-        
-        logger.info("Constants.apiKey 已设置: {}", Constants.apiKey.substring(0, Math.min(8, Constants.apiKey.length())) + "...");
-        
-        // 创建 TextEmbedding 实例
+
+        // 创建 TextEmbedding 实例。
+        // 注意：不再写 SDK 的全局静态变量 Constants.apiKey（该全局状态会被多个服务竞态覆盖），
+        // 而是在每次调用时通过 TextEmbeddingParam.apiKey(...) 显式传入。
         textEmbedding = new TextEmbedding();
-        
+
         logger.info("阿里云 DashScope Embedding 服务初始化完成，模型: {}", model);
     }
 
@@ -81,19 +71,11 @@ public class VectorEmbeddingService {
             }
 
             logger.debug("开始生成向量嵌入, 内容长度: {} 字符", content.length());
-            
-            // 确保 API Key 已设置（防止被其他地方覆盖）
-            if (Constants.apiKey == null || Constants.apiKey.isEmpty()) {
-                logger.warn("检测到 Constants.apiKey 为空，重新设置");
-                Constants.apiKey = apiKey;
-            }
-            
-            logger.debug("调用 API 前 Constants.apiKey: {}", 
-                Constants.apiKey != null ? Constants.apiKey.substring(0, Math.min(8, Constants.apiKey.length())) + "..." : "null");
 
-            // 构建请求参数
+            // 构建请求参数（显式传 apiKey，避免依赖 SDK 全局静态变量）
             TextEmbeddingParam param = TextEmbeddingParam
                     .builder()
+                    .apiKey(apiKey)
                     .model(model)
                     .texts(Collections.singletonList(content)) // 创建一个不可变的单元素 List，里面只包含 content 这一个对象。
                     .build();
@@ -156,16 +138,11 @@ public class VectorEmbeddingService {
             }
 
             logger.info("开始批量生成向量嵌入, 数量: {}", contents.size());
-            
-            // 确保 API Key 已设置
-            if (Constants.apiKey == null || Constants.apiKey.isEmpty()) {
-                logger.warn("检测到 Constants.apiKey 为空，重新设置");
-                Constants.apiKey = apiKey;
-            }
 
-            // 构建请求参数 - 批量输入
+            // 构建请求参数 - 批量输入（显式传 apiKey，避免依赖 SDK 全局静态变量）
             TextEmbeddingParam param = TextEmbeddingParam
                     .builder()
+                    .apiKey(apiKey)
                     .model(model)
                     .texts(contents)
                     .build();

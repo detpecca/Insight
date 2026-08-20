@@ -8,7 +8,6 @@ import com.alibaba.dashscope.common.Role;
 import com.alibaba.dashscope.exception.ApiException;
 import com.alibaba.dashscope.exception.InputRequiredException;
 import com.alibaba.dashscope.exception.NoApiKeyException;
-import com.alibaba.dashscope.utils.Constants;
 import io.reactivex.Flowable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,11 +47,8 @@ public class RagService {
 
     @PostConstruct
     public void init() {
-        // 设置 API Key 和 Base URL
-        Constants.apiKey = apiKey;
-        Constants.baseHttpApiUrl = "https://dashscope.aliyuncs.com/api/v1";
-
-        // 创建 Generation 实例
+        // 注意：不再写 SDK 的全局静态变量 Constants.apiKey（多服务写同一全局状态会产生竞态），
+        // GenerationParam 会在调用时显式传入 apiKey。
         generation = new Generation();
 
         logger.info("RAG 服务初始化完成，model: {}, topK: {}", model, topK);

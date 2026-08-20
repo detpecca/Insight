@@ -27,6 +27,9 @@ public class MilvusClientFactory {
 
     private static final Logger logger = LoggerFactory.getLogger(MilvusClientFactory.class);
 
+    /** Milvus 对"collection 已加载"返回的状态码（幂等成功） */
+    private static final int COLLECTION_ALREADY_LOADED = 65535;
+
     @Autowired
     private MilvusProperties milvusProperties;
 
@@ -59,6 +62,10 @@ public class MilvusClientFactory {
             } else {
                 logger.info("collection '{}' 已存在", MilvusConstants.MILVUS_COLLECTION_NAME);
             }
+
+            // 3. 启动时统一加载 collection（幂等操作；已加载时返回的 65535 状态码视为成功）。
+            // 之后所有查询/写入操作都不再需要重复加载。
+            loadCollection(client);
 
             return client;
 
@@ -153,6 +160,21 @@ public class MilvusClientFactory {
         if (response.getStatus() != 0) {
             throw new RuntimeException("创建 collection 失败: " + response.getMessage());
         }
+    }
+
+    /**
+     * 加载 collection 到内存（幂等）。
+     * 已加载时 Milvus 返回状态码 65535，视为成功。
+     */
+    private void loadCollection(MilvusServiceClient client) {
+        R<RpcStatus> loadResponse = client.loadCollection(
+                LoadCollectionParam.newBuilder()
+                        .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                        .build());
+        if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != COLLECTION_ALREADY_LOADED) {
+            throw new RuntimeException("加载 collection 失败: " + loadResponse.getMessage());
+        }
+        logger.info("collection '{}' 已加载", MilvusConstants.MILVUS_COLLECTION_NAME);
     }
 
     /**

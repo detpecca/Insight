@@ -27,9 +27,9 @@
 |------|------|------|
 | Java | 17 | 开发语言 |
 | Spring Boot | 3.2.0 | 应用框架 |
-| Spring AI | - | AI Agent 框架 |
-| DashScope | 2.17.0 | 阿里云 AI 服务 |
-| Milvus | 2.6.10 | 向量数据库 |
+| Spring AI / Spring AI Alibaba | 1.1.0 / 1.1.0.0-RC2 | AI Agent 框架 |
+| DashScope SDK | 2.17.0 | 阿里云 AI 服务 |
+| Milvus SDK | 2.6.10 | 向量数据库 |
 
 ## 📦 核心模块
 
@@ -37,18 +37,27 @@
 Insight/
 ├── src/main/java/org/example/
 │   ├── controller/
-│   │   └── ChatController.java        # 统一接口控制器 ⭐
+│   │   ├── ChatController.java        # 统一接口控制器 ⭐
+│   │   ├── FileUploadController.java  # 文件上传（路径穿越防护）
+│   │   └── MilvusCheckController.java # Milvus 健康检查
 │   ├── service/
 │   │   ├── ChatService.java           # 对话服务 ⭐
 │   │   ├── AiOpsService.java          # AIOps 服务 ⭐
-│   │   ├── RagService.java            # RAG 服务
-│   │   └── Vector*.java               # 向量服务
+│   │   ├── ChatSession(Service).java  # 会话管理（TTL 淘汰 + 上限）
+│   │   ├── MemoryManagerService.java  # 文件记忆系统（规则加固）
+│   │   ├── RagService.java            # RAG 服务（未接入控制器）
+│   │   └── Vector*.java               # 向量服务（批量 upsert）
 │   ├── agent/tool/                    # Agent 工具集
 │   │   ├── DateTimeTools.java         # 时间工具
 │   │   ├── InternalDocsTools.java     # 文档检索
 │   │   ├── QueryMetricsTools.java     # 告警查询
-│   │   └── QueryLogsTools.java        # 日志查询
+│   │   ├── QueryLogsTools.java        # 日志查询（仅 mock 模式注册）
+│   │   └── MemoryTools.java           # 记忆读写
+│   ├── dto/                           # ApiResponse 等传输对象
+│   ├── exception/                     # 全局异常处理
+│   ├── util/                          # SafePaths（路径安全）
 │   └── config/                        # 配置类
+├── src/test/java/                     # 32 个单元测试（无需 Docker）
 ├── src/main/resources/
 │   ├── static/                        # Web 界面
 │   └── application.yml                # 应用配置
@@ -115,11 +124,24 @@ milvus:
   host: localhost
   port: 19530
 
-# 阿里云 DashScope
+# 阿里云 DashScope（从环境变量读取，勿在仓库中硬编码）
 spring:
   ai:
     dashscope:
-      api-key: "${DASHSCOPE_API_KEY}" // 环境变量
+      api-key: "${DASHSCOPE_API_KEY}"
+
+# CORS 允许来源（默认仅本机开发）
+cors:
+  allowed-origins: http://localhost:9900,http://127.0.0.1:9900
+
+# 会话生存策略（内存会话）
+session:
+  idle-timeout-minutes: 30
+  max-sessions: 1000
+
+# 记忆系统
+memory:
+  max-insight-lines: 200
 
 # RAG 配置
 rag:
@@ -138,6 +160,8 @@ document:
 ```bash
 export DASHSCOPE_API_KEY=your-api-key
 ```
+
+> ⚠️ **安全提醒**：API Key 曾泄露到 git 历史中，若此仓库曾推送远端，请务必先在 DashScope 控制台吊销旧 Key 并重建。
 
 
 ## 🚀 快速开始
@@ -187,4 +211,10 @@ curl -X POST http://localhost:9900/api/chat \
 
 # 健康检查
 curl http://localhost:9900/milvus/health
+```
+
+### 4. 运行测试
+
+```bash
+mvn test   # 32 个单元测试：路径穿越防护、分片、会话窗口、记忆系统、报告校验
 ```
