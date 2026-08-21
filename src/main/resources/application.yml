@@ -46,6 +46,9 @@ spring:
       chat:
         options:
           timeout: 180000  # 超时时间180秒（3分钟）
+      embedding:
+        # 向量化模型（Spring AI Alibaba 自动装配 DashScopeEmbeddingModel）
+        model: text-embedding-v4
       retry:
         max-attempts: 3  # 最大重试次数
         backoff:
@@ -69,12 +72,7 @@ spring:
 #              sse-endpoint: /sse/92XXXXXXXXb4  # 完整的SSE端点路径
 
 # 阿里云 DashScope Embedding API 配置
-dashscope:
-  api:
-    # 从环境变量读取，禁止在代码仓库中硬编码真实 Key
-    key: ${DASHSCOPE_API_KEY:}
-  embedding:
-    model: text-embedding-v4  # 阿里云文本向量化模型
+# 注：key 与 embedding 模型已统一收敛到 spring.ai.dashscope 下（见上），此处仅保留业务参数
 
 # 文档分片配置
 document:
@@ -85,7 +83,8 @@ document:
 # RAG 配置
 rag:
   top-k: 3  # 检索返回的最相似文档数量
-  model: "qwen3-max"  # 大语言模型名称
+  # L2 距离阈值：仅返回距离小于该值的结果（越小越严格）。0 或负数表示不过滤
+  max-l2-distance: 0
 
 # Prometheus 配置
 prometheus:

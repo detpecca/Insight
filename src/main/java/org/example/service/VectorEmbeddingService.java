@@ -1,186 +1,84 @@
 package org.example.service;
 
-import com.alibaba.dashscope.embeddings.TextEmbedding;
-import com.alibaba.dashscope.embeddings.TextEmbeddingParam;
-import com.alibaba.dashscope.embeddings.TextEmbeddingResult;
-import com.alibaba.dashscope.embeddings.TextEmbeddingOutput;
-import com.alibaba.dashscope.embeddings.TextEmbeddingResultItem;
-import com.alibaba.dashscope.exception.NoApiKeyException;
-import org.jetbrains.annotations.NotNull;
+import com.alibaba.cloud.ai.dashscope.embedding.DashScopeEmbeddingModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.ai.embedding.EmbeddingRequest;
+import org.springframework.ai.embedding.EmbeddingResponse;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
 /**
- * 向量嵌入服务
- * 使用阿里云 DashScope Text Embedding API
+ * 向量嵌入服务。
+ * 走 Spring AI 的 {@link DashScopeEmbeddingModel}（由 spring-ai-alibaba-starter-dashscope
+ * 自动装配，api-key 取自 spring.ai.dashscope.api-key），与聊天路径统一为一条
+ * DashScope 集成链路，不再依赖原生 dashscope-sdk-java 及其全局静态状态。
  */
 @Service
 public class VectorEmbeddingService {
 
     private static final Logger logger = LoggerFactory.getLogger(VectorEmbeddingService.class);
 
-    @Value("${dashscope.api.key}")
-    private String apiKey;
+    private final DashScopeEmbeddingModel embeddingModel;
 
-    @Value("${dashscope.embedding.model}")
-    private String model;
-
-    private TextEmbedding textEmbedding;
-
-    @PostConstruct
-    public void init() {
-        // 验证 API Key
-        if (apiKey == null || apiKey.trim().isEmpty() || apiKey.equals("your-api-key-here")) {
-            logger.error("API Key 未正确配置！请设置环境变量 DASHSCOPE_API_KEY");
-            throw new IllegalStateException("请设置环境变量 DASHSCOPE_API_KEY");
-        }
-
-        // 打印 API Key 前缀用于调试（不打印完整 Key 保证安全）
-        String maskedKey = apiKey.length() > 8 ?
-            apiKey.substring(0, 8) + "..." + apiKey.substring(apiKey.length() - 4) :
-            "***";
-        logger.info("API Key 已加载: {}", maskedKey);
-
-        // 创建 TextEmbedding 实例。
-        // 注意：不再写 SDK 的全局静态变量 Constants.apiKey（该全局状态会被多个服务竞态覆盖），
-        // 而是在每次调用时通过 TextEmbeddingParam.apiKey(...) 显式传入。
-        textEmbedding = new TextEmbedding();
-
-        logger.info("阿里云 DashScope Embedding 服务初始化完成，模型: {}", model);
+    @Autowired
+    public VectorEmbeddingService(DashScopeEmbeddingModel embeddingModel) {
+        this.embeddingModel = embeddingModel;
+        logger.info("向量嵌入服务初始化完成（Spring AI DashScopeEmbeddingModel）");
     }
 
     /**
      * 生成向量嵌入
-     * 调用阿里云 DashScope Text Embedding API
-     * 
+     *
      * @param content 文本内容
      * @return 向量嵌入（浮点数列表）
      */
     public List<Float> generateEmbedding(String content) {
+        if (content == null || content.trim().isEmpty()) {
+            logger.warn("内容为空，无法生成向量");
+            throw new IllegalArgumentException("内容不能为空");
+        }
+
         try {
-            if (content == null || content.trim().isEmpty()) {
-                logger.warn("内容为空，无法生成向量");
-                throw new IllegalArgumentException("内容不能为空");
+            List<Float> vector = toFloatList(embeddingModel.embed(content));
+            if (vector.isEmpty()) {
+                throw new RuntimeException("Embedding API 返回空向量");
             }
-
-            logger.debug("开始生成向量嵌入, 内容长度: {} 字符", content.length());
-
-            // 构建请求参数（显式传 apiKey，避免依赖 SDK 全局静态变量）
-            TextEmbeddingParam param = TextEmbeddingParam
-                    .builder()
-                    .apiKey(apiKey)
-                    .model(model)
-                    .texts(Collections.singletonList(content)) // 创建一个不可变的单元素 List，里面只包含 content 这一个对象。
-                    .build();
-
-            // 调用 API
-            TextEmbeddingResult result = textEmbedding.call(param);
-
-            // 检查结果
-            List<Float> floatEmbedding = getFloats(result);
-
-            logger.info("成功生成向量嵌入, 内容长度: {} 字符, 向量维度: {}", 
-                content.length(), floatEmbedding.size());
-
-            return floatEmbedding;
-
-        } catch (NoApiKeyException e) {
-            logger.error("API Key 未设置或无效", e);
-            throw new RuntimeException("API Key 未设置，请配置 dashscope.api.key", e);
+            logger.debug("成功生成向量嵌入, 内容长度: {} 字符, 向量维度: {}",
+                    content.length(), vector.size());
+            return vector;
         } catch (Exception e) {
-            logger.error("生成向量嵌入失败, 内容长度: {}", content != null ? content.length() : 0, e);
+            logger.error("生成向量嵌入失败, 内容长度: {}", content.length(), e);
             throw new RuntimeException("生成向量嵌入失败: " + e.getMessage(), e);
         }
     }
 
-    @NotNull
-    private static List<Float> getFloats(TextEmbeddingResult result) {
-        if (result == null || result.getOutput() == null || result.getOutput().getEmbeddings() == null) {
-            throw new RuntimeException("DashScope API 返回空结果");
-        }
-
-        TextEmbeddingOutput output = result.getOutput();
-        List<TextEmbeddingResultItem> embeddings = output.getEmbeddings();
-
-        if (embeddings.isEmpty()) {
-            throw new RuntimeException("DashScope API 返回空向量列表");
-        }
-
-        // 获取第一个文本的向量
-        List<Double> embeddingDoubles = embeddings.get(0).getEmbedding();
-
-        // 转换为 List<Float>
-        List<Float> floatEmbedding = new ArrayList<>(embeddingDoubles.size());
-        for (Double value : embeddingDoubles) {
-            floatEmbedding.add(value.floatValue());
-        }
-        return floatEmbedding;
-    }
-
     /**
-     * 批量生成向量嵌入
-     * 
+     * 批量生成向量嵌入（单次 Embedding API 调用）。
+     *
      * @param contents 文本内容列表
-     * @return 向量嵌入列表
+     * @return 向量嵌入列表，与输入顺序一一对应
      */
     public List<List<Float>> generateEmbeddings(List<String> contents) {
+        if (contents == null || contents.isEmpty()) {
+            logger.warn("内容列表为空，无法生成向量");
+            return Collections.emptyList();
+        }
+
         try {
-            if (contents == null || contents.isEmpty()) {
-                logger.warn("内容列表为空，无法生成向量");
-                return Collections.emptyList();
-            }
-
             logger.info("开始批量生成向量嵌入, 数量: {}", contents.size());
+            EmbeddingResponse response = embeddingModel.call(new EmbeddingRequest(contents, null));
 
-            // 构建请求参数 - 批量输入（显式传 apiKey，避免依赖 SDK 全局静态变量）
-            TextEmbeddingParam param = TextEmbeddingParam
-                    .builder()
-                    .apiKey(apiKey)
-                    .model(model)
-                    .texts(contents)
-                    .build();
-
-            // 调用 API
-            TextEmbeddingResult result = textEmbedding.call(param);
-
-            // 检查结果
-            if (result == null || result.getOutput() == null || result.getOutput().getEmbeddings() == null) {
-                throw new RuntimeException("批量 DashScope API 返回空结果");
-            }
-
-            List<TextEmbeddingResultItem> embeddingItems = result.getOutput().getEmbeddings();
-            
-            if (embeddingItems.isEmpty()) {
-                throw new RuntimeException("批量 DashScope API 返回空向量列表");
-            }
-
-            // 转换结果
             List<List<Float>> embeddings = new ArrayList<>();
-            for (TextEmbeddingResultItem item : embeddingItems) {
-                List<Double> embeddingDoubles = item.getEmbedding();
-                List<Float> embedding = new ArrayList<>(embeddingDoubles.size());
-                for (Double value : embeddingDoubles) {
-                    embedding.add(value.floatValue());
-                }
-                embeddings.add(embedding);
-            }
+            response.getResults().forEach(r -> embeddings.add(toFloatList(r.getOutput())));
 
-            logger.info("成功批量生成向量嵌入, 数量: {}, 维度: {}", 
-                embeddings.size(), 
-                embeddings.isEmpty() ? 0 : embeddings.get(0).size());
-
+            logger.info("成功批量生成向量嵌入, 数量: {}, 维度: {}",
+                    embeddings.size(), embeddings.isEmpty() ? 0 : embeddings.get(0).size());
             return embeddings;
-
-        } catch (NoApiKeyException e) {
-            logger.error("批量调用时 API Key 未设置或无效", e);
-            throw new RuntimeException("API Key 未设置，请配置 dashscope.api.key", e);
         } catch (Exception e) {
             logger.error("批量生成向量嵌入失败", e);
             throw new RuntimeException("批量生成向量嵌入失败: " + e.getMessage(), e);
@@ -189,7 +87,7 @@ public class VectorEmbeddingService {
 
     /**
      * 生成查询向量
-     * 
+     *
      * @param query 查询文本
      * @return 向量嵌入
      */
@@ -199,7 +97,7 @@ public class VectorEmbeddingService {
 
     /**
      * 计算两个向量的余弦相似度
-     * 
+     *
      * @param vector1 向量1
      * @param vector2 向量2
      * @return 余弦相似度 [-1, 1]
@@ -220,5 +118,13 @@ public class VectorEmbeddingService {
         }
 
         return dotProduct / (float) (Math.sqrt(norm1) * Math.sqrt(norm2));
+    }
+
+    private static List<Float> toFloatList(float[] raw) {
+        List<Float> result = new ArrayList<>(raw.length);
+        for (float v : raw) {
+            result.add(v);
+        }
+        return result;
     }
 }

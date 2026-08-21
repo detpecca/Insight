@@ -40,7 +40,7 @@ There is a **unit test suite** in `src/test` (32 tests, pure logic, no Docker ne
 
 - `POST /api/chat` — non-streaming ReactAgent chat with tool calling + session history.
 - `POST /api/chat_stream` — SSE streaming version (`text/event-stream`).
-- `POST /api/ai_ops` — SSE; runs the multi-agent AIOps analysis, archives the report, streams it back. No request body needed.
+- `POST /api/ai_ops` — SSE; runs the multi-agent AIOps analysis as a **streamed** graph (`supervisor.stream()`): each Planner/Executor node completion is pushed as a `progress` event while the run proceeds, then the final report is archived and streamed back. No request body needed.
 - `POST /api/chat/clear`, `GET /api/chat/session/{id}` — session management.
 - `POST /api/upload` (`FileUploadController`) — upload txt/md → traversal-checked filename → chunk → embed → batch-upsert into Milvus. If indexing fails the endpoint now returns 500 (file kept on disk) instead of a silent success.
 - `GET /milvus/health` (`MilvusCheckController`) — health check used by Makefile.
@@ -49,10 +49,11 @@ Request JSON uses capitalized keys `Id` / `Question` (with lowercase aliases). S
 
 ## Architecture
 
-### Two distinct DashScope integration paths (important)
-This codebase uses DashScope **two different ways** — do not confuse them:
-1. **Spring AI Alibaba agents** (`DashScopeChatModel` + `ReactAgent`) — used by `ChatService` and `AiOpsService`. This is the path wired into `ChatController`.
-2. **Raw DashScope SDK** (`com.alibaba.dashscope.Generation`) — used by `RagService` and the embedding/vector services. `RagService` exists but is **not currently wired into any controller**; the chat endpoints go through `ChatService`'s ReactAgent, not `RagService`.
+### DashScope integration: single path (Spring AI Alibaba)
+All DashScope calls go through Spring AI Alibaba — the raw `dashscope-sdk-java` dependency and the old `RagService` have been removed:
+1. **Chat**: the standard `DashScopeChatModel` Bean is auto-configured (`spring.ai.dashscope.chat.options.*`) and injected everywhere; an `aiOpsChatModel` Bean (temperature 0.3 / maxToken 8000) is defined in `DashScopeConfig`. A single `DashScopeApi` Bean carries the HTTP timeout config. No per-request model/API rebuilding.
+2. **Embeddings**: `DashScopeEmbeddingModel` (auto-configured, `spring.ai.dashscope.embedding.model=text-embedding-v4`) is used by `VectorEmbeddingService`.
+The chat endpoints go through `ChatService`'s ReactAgent; RAG retrieval is provided by the `InternalDocsTools` agent tool.
 
 ### AIOps multi-agent flow (`AiOpsService`)
 A `SupervisorAgent` orchestrates two `ReactAgent`s in a plan→execute→replan loop:
@@ -74,8 +75,8 @@ Not stored in Milvus — plain files on disk, guarded by `ReentrantReadWriteLock
 
 ### Vector pipeline (Milvus)
 - `DocumentChunkService` — splits docs (config `document.chunk`: max-size 800, overlap 100).
-- `VectorEmbeddingService` — DashScope `text-embedding-v4`, **1024-dim** vectors. API key is passed per-request (`TextEmbeddingParam.apiKey`), NOT via the SDK's global static `Constants.apiKey`.
-- `VectorIndexService` / `VectorSearchService` — collection `biz` in DB `default` (see `MilvusConstants`). `rag.top-k=3`. Indexing is delete-old + single **batch upsert** with deterministic ids (`_source` + chunkIndex), so re-indexing a file never duplicates rows.
+- `VectorEmbeddingService` — wraps Spring AI's `DashScopeEmbeddingModel`, **1024-dim** vectors.
+- `VectorIndexService` / `VectorSearchService` — collection `biz` in DB `default` (see `MilvusConstants`). `rag.top-k=3`; `rag.max-l2-distance` (0 = off) optionally filters results whose L2 distance exceeds the threshold. Chunks longer than the 8192-char `content` field limit are rejected before upsert.
 - `MilvusClientFactory` / `MilvusConfig` / `MilvusProperties` — connection to `localhost:19530`; the collection is loaded **once at startup** in the factory (status 65535 = already loaded), never per-operation.
 
 ### Session state

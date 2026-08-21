@@ -155,6 +155,13 @@ public class VectorIndexService {
         for (int i = 0; i < chunks.size(); i++) {
             DocumentChunk chunk = chunks.get(i);
             try {
+                // 防御：content 字段在 schema 中有长度上限，超长分片直接拒绝，
+                // 避免整批 upsert 在 Milvus 端失败
+                if (chunk.getContent() != null && chunk.getContent().length() > MilvusConstants.CONTENT_MAX_LENGTH) {
+                    throw new IllegalStateException(String.format(
+                            "分片 %d 长度 %d 超过 Milvus content 字段上限 %d",
+                            chunk.getChunkIndex(), chunk.getContent().length(), MilvusConstants.CONTENT_MAX_LENGTH));
+                }
                 List<Float> vector = embeddingService.generateEmbedding(chunk.getContent());
                 Map<String, Object> metadata = buildMetadata(path.toString(), chunk, chunks.size());
 

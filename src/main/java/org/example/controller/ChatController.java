@@ -1,16 +1,16 @@
 package org.example.controller;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.NodeOutput;
-import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
-import lombok.Getter;
-import lombok.Setter;
 import org.example.dto.ApiResponse;
+import org.example.dto.ChatRequest;
+import org.example.dto.ChatResponse;
+import org.example.dto.ClearRequest;
+import org.example.dto.SessionInfoResponse;
+import org.example.dto.SseMessage;
 import org.example.exception.BusinessException;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
@@ -67,9 +67,12 @@ public class ChatController {
     @Autowired
     private ToolCallbackProvider tools;
 
+    /** 标准对话模型（单例，自动装配，temperature 0.7 / maxToken 2000） */
+    @Autowired
+    private DashScopeChatModel dashScopeChatModel;
+
     /**
      * SSE 任务线程池：有界队列 + 队列满时由调用线程执行（天然限流）。
-     * 旧实现的 CachedThreadPool 无上界，突发流量下可能创建大量线程。
      */
     private final ExecutorService executor = new ThreadPoolExecutor(
             4, 32, 60L, TimeUnit.SECONDS,
@@ -111,17 +114,11 @@ public class ChatController {
         List<java.util.Map<String, String>> history = session.getHistory();
         logger.info("会话历史消息对数: {}", history.size() / 2);
 
-        // 创建 DashScope API 和 ChatModel
-        DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-        DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
-
         logger.info("开始 ReactAgent 对话（支持自动工具调用）");
 
         // 构建系统提示词（历史消息不再拼入 system prompt）
         String systemPrompt = chatService.buildSystemPrompt();
-
-        // 创建 ReactAgent
-        ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
+        ReactAgent agent = chatService.createReactAgent(dashScopeChatModel, systemPrompt);
 
         // 执行对话：历史作为真正的 User/Assistant 消息传入
         List<Message> messages = chatService.buildMessages(history, question);
@@ -189,17 +186,11 @@ public class ChatController {
                 List<java.util.Map<String, String>> history = session.getHistory();
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
-                // 创建 DashScope API 和 ChatModel
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
-
                 logger.info("开始 ReactAgent 流式对话（支持自动工具调用）");
 
                 // 构建系统提示词（历史消息不再拼入 system prompt）
                 String systemPrompt = chatService.buildSystemPrompt();
-
-                // 创建 ReactAgent
-                ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
+                ReactAgent agent = chatService.createReactAgent(dashScopeChatModel, systemPrompt);
 
                 // 用于累积完整答案
                 StringBuilder fullAnswerBuilder = new StringBuilder();
@@ -311,7 +302,8 @@ public class ChatController {
 
     /**
      * AI 智能运维接口（SSE 流式模式）- 自动分析告警并生成运维报告
-     * 无需用户输入，自动执行告警分析流程
+     * 无需用户输入，自动执行告警分析流程。
+     * 多 Agent 编排的每个节点完成都会推送 progress 事件，前端可实时展示分析进度。
      */
     @PostMapping(value = "/ai_ops", produces = "text/event-stream;charset=UTF-8")
     public SseEmitter aiOps() {
@@ -331,79 +323,43 @@ public class ChatController {
             try {
                 logger.info("收到 AI 智能运维请求 - 启动多 Agent 协作流程");
 
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = DashScopeChatModel.builder()
-                        .dashScopeApi(dashScopeApi)
-                        .defaultOptions(DashScopeChatOptions.builder()
-                                .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                                .withTemperature(0.3)
-                                .withMaxToken(8000)
-                                .withTopP(0.9)
-                                .build())
-                        .build();
-
                 ToolCallback[] toolCallbacks = tools.getToolCallbacks();
 
-                emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.progress("正在读取告警并拆解任务..."), MediaType.APPLICATION_JSON));
 
-                // 调用 AiOpsService 执行分析流程
-                Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks);
+                // 流式执行多 Agent 编排：每个节点完成实时推送进度，结束后提取报告
+                Flux<NodeOutput> stream = aiOpsService.streamAiOpsAnalysis(toolCallbacks);
 
-                if (overAllStateOptional.isEmpty()) {
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.error("多 Agent 编排未获取到有效结果"), MediaType.APPLICATION_JSON));
-                    emitter.complete();
-                    return;
-                }
+                AtomicReference<com.alibaba.cloud.ai.graph.OverAllState> lastState = new AtomicReference<>();
 
-                OverAllState state = overAllStateOptional.get();
-                logger.info("AI Ops 编排完成，开始提取最终报告...");
-
-                // 提取最终报告（含格式校验）
-                Optional<String> finalReportOptional = aiOpsService.extractFinalReport(state);
-
-                // 输出最终报告
-                if (finalReportOptional.isPresent()) {
-                    String finalReportText = finalReportOptional.get();
-                    logger.info("提取到 Planner 最终报告，长度: {}", finalReportText.length());
-
-                    // 将报告归档到记忆流中
-                    memoryManagerService.archiveAiOpsReport(finalReportText);
-
-                    // 发送分隔线
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("\n\n" + "=".repeat(60) + "\n"), MediaType.APPLICATION_JSON));
-
-                    // 发送完整的告警分析报告
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("📋 **告警分析报告**\n\n"), MediaType.APPLICATION_JSON));
-
-                    int chunkSize = 50;
-                    for (int i = 0; i < finalReportText.length(); i += chunkSize) {
-                        int end = Math.min(i + chunkSize, finalReportText.length());
-                        String chunk = finalReportText.substring(i, end);
-
-                        emitter.send(SseEmitter.event()
-                                .name("message")
-                                .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
-                    }
-
-                    // 发送结束分隔线
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("\n" + "=".repeat(60) + "\n\n"), MediaType.APPLICATION_JSON));
-
-                    logger.info("最终报告已完整输出");
-                } else {
-                    logger.warn("未能提取到 Planner 最终报告（输出可能不是合法报告格式）");
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("⚠️ 多 Agent 流程已完成，但未能生成符合格式的最终报告，请重试。"), MediaType.APPLICATION_JSON));
-                }
-
-                emitter.send(SseEmitter.event().name("message").data(SseMessage.done(), MediaType.APPLICATION_JSON));
-                emitter.complete();
-                logger.info("AI Ops 多 Agent 编排完成");
+                stream.doOnNext(output -> {
+                            lastState.set(output.state());
+                            try {
+                                emitter.send(SseEmitter.event().name("message")
+                                        .data(SseMessage.progress(describeProgress(output)), MediaType.APPLICATION_JSON));
+                            } catch (IOException e) {
+                                logger.warn("发送进度事件失败（客户端可能已断开）: {}", e.getMessage());
+                            }
+                        })
+                        .doFinally(signal -> heartbeat.cancel(false))
+                        .subscribe(
+                                output -> { /* 进度已在 doOnNext 中处理 */ },
+                                error -> {
+                                    logger.error("AI Ops 多 Agent 协作失败", error);
+                                    try {
+                                        emitter.send(SseEmitter.event().name("message")
+                                                .data(SseMessage.error("AI Ops 流程失败，请稍后重试"), MediaType.APPLICATION_JSON));
+                                    } catch (IOException ex) {
+                                        logger.error("发送错误消息失败", ex);
+                                    }
+                                    emitter.completeWithError(error);
+                                },
+                                () -> sendFinalReport(emitter, lastState.get())
+                        );
 
             } catch (Exception e) {
+                heartbeat.cancel(false);
                 logger.error("AI Ops 多 Agent 协作失败", e);
                 try {
                     emitter.send(SseEmitter.event().name("message")
@@ -412,12 +368,88 @@ public class ChatController {
                     logger.error("发送错误消息失败", ex);
                 }
                 emitter.completeWithError(e);
-            } finally {
-                heartbeat.cancel(false);
             }
         });
 
         return emitter;
+    }
+
+    /**
+     * 把节点输出转成一句人类可读的进度描述
+     */
+    private String describeProgress(NodeOutput output) {
+        String node = output.node();
+        if (node == null) {
+            return "分析中...";
+        }
+        if (node.contains("planner")) {
+            return "🧭 Planner 完成一轮规划";
+        } else if (node.contains("executor")) {
+            return "⚙️ Executor 完成一步执行";
+        } else if (output.isEND()) {
+            return "✅ 编排完成，正在整理报告...";
+        }
+        return "节点 [" + node + "] 完成";
+    }
+
+    /**
+     * 编排结束后：提取并归档报告，再分块推给前端
+     */
+    private void sendFinalReport(SseEmitter emitter, com.alibaba.cloud.ai.graph.OverAllState state) {
+        try {
+            if (state == null) {
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.error("多 Agent 编排未获取到有效结果"), MediaType.APPLICATION_JSON));
+                emitter.complete();
+                return;
+            }
+
+            logger.info("AI Ops 编排完成，开始提取最终报告...");
+            Optional<String> finalReportOptional = aiOpsService.extractFinalReport(state);
+
+            if (finalReportOptional.isPresent()) {
+                String finalReportText = finalReportOptional.get();
+                logger.info("提取到 Planner 最终报告，长度: {}", finalReportText.length());
+
+                // 将报告归档到记忆流中
+                memoryManagerService.archiveAiOpsReport(finalReportText);
+
+                // 发送分隔线
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.content("\n\n" + "=".repeat(60) + "\n"), MediaType.APPLICATION_JSON));
+
+                // 发送完整的告警分析报告
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.content("📋 **告警分析报告**\n\n"), MediaType.APPLICATION_JSON));
+
+                int chunkSize = 50;
+                for (int i = 0; i < finalReportText.length(); i += chunkSize) {
+                    int end = Math.min(i + chunkSize, finalReportText.length());
+                    String chunk = finalReportText.substring(i, end);
+
+                    emitter.send(SseEmitter.event()
+                            .name("message")
+                            .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
+                }
+
+                // 发送结束分隔线
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.content("\n" + "=".repeat(60) + "\n\n"), MediaType.APPLICATION_JSON));
+
+                logger.info("最终报告已完整输出");
+            } else {
+                logger.warn("未能提取到 Planner 最终报告（输出可能不是合法报告格式）");
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.content("⚠️ 多 Agent 流程已完成，但未能生成符合格式的最终报告，请重试。"), MediaType.APPLICATION_JSON));
+            }
+
+            emitter.send(SseEmitter.event().name("message").data(SseMessage.done(), MediaType.APPLICATION_JSON));
+            emitter.complete();
+            logger.info("AI Ops 多 Agent 编排完成");
+        } catch (Exception e) {
+            logger.error("发送最终报告失败", e);
+            emitter.completeWithError(e);
+        }
     }
 
 
@@ -438,103 +470,5 @@ public class ChatController {
         response.setMessagePairCount(session.getMessagePairCount());
         response.setCreateTime(session.getCreateTime());
         return ResponseEntity.ok(ApiResponse.success(response));
-    }
-
-    // ==================== 内部类 ====================
-
-    /**
-     * 聊天请求
-     */
-    @Setter
-    @Getter
-    public static class ChatRequest {
-        @com.fasterxml.jackson.annotation.JsonProperty(value = "Id")
-        @com.fasterxml.jackson.annotation.JsonAlias({"id", "ID"})
-        private String Id;
-
-        @com.fasterxml.jackson.annotation.JsonProperty(value = "Question")
-        @com.fasterxml.jackson.annotation.JsonAlias({"question", "QUESTION"})
-        private String Question;
-
-    }
-
-    /**
-     * 清空会话请求
-     */
-    @Setter
-    @Getter
-    public static class ClearRequest {
-        @com.fasterxml.jackson.annotation.JsonProperty(value = "Id")
-        @com.fasterxml.jackson.annotation.JsonAlias({"id", "ID"})
-        private String Id;
-    }
-
-    /**
-     * 会话信息响应
-     */
-    @Setter
-    @Getter
-    public static class SessionInfoResponse {
-        private String sessionId;
-        private int messagePairCount;
-        private long createTime;
-    }
-
-    /**
-     * 统一聊天响应格式
-     * 适用于所有普通返回模式的对话接口
-     */
-    @Setter
-    @Getter
-    public static class ChatResponse {
-        private boolean success;
-        private String answer;
-        private String errorMessage;
-
-        public static ChatResponse success(String answer) {
-            ChatResponse response = new ChatResponse();
-            response.setSuccess(true);
-            response.setAnswer(answer);
-            return response;
-        }
-
-        public static ChatResponse error(String errorMessage) {
-            ChatResponse response = new ChatResponse();
-            response.setSuccess(false);
-            response.setErrorMessage(errorMessage);
-            return response;
-        }
-    }
-
-    /**
-     * 统一 SSE 流式消息格式
-     * 适用于所有 SSE 流式返回模式的对话接口
-     */
-    @Setter
-    @Getter
-    public static class SseMessage {
-        private String type;  // content: 内容块, error: 错误, done: 完成
-        private String data;
-
-        public static SseMessage content(String data) {
-            SseMessage message = new SseMessage();
-            message.setType("content");
-            message.setData(data);
-            return message;
-        }
-
-        public static SseMessage error(String errorMessage) {
-            SseMessage message = new SseMessage();
-            message.setType("error");
-            message.setData(errorMessage);
-            return message;
-        }
-
-        public static SseMessage done() {
-            SseMessage message = new SseMessage();
-            message.setType("done");
-            message.setData(null);
-            return message;
-        }
     }
 }

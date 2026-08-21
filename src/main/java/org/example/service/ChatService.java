@@ -1,8 +1,6 @@
 package org.example.service;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import org.example.agent.tool.DateTimeTools;
@@ -17,7 +15,6 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -26,7 +23,10 @@ import java.util.Map;
 
 /**
  * 聊天服务
- * 封装 ReactAgent 对话的公共逻辑，包括模型创建、系统提示词构建、Agent 配置等
+ * 封装 ReactAgent 对话的公共逻辑，包括系统提示词构建、消息构建、Agent 配置等。
+ * <p>
+ * 标准对话模型（temperature 0.7 / maxToken 2000）为单例 Bean，由 {@code DashScopeChatAutoConfiguration}
+ * 自动装配（配置见 spring.ai.dashscope.chat.options），不再每请求重建。
  */
 @Service
 public class ChatService {
@@ -53,44 +53,6 @@ public class ChatService {
 
     @Autowired
     private org.example.agent.tool.MemoryTools memoryTools;
-
-    @Value("${spring.ai.dashscope.api-key}")
-    private String dashScopeApiKey;
-
-    /**
-     * 创建 DashScope API 实例
-     */
-    public DashScopeApi createDashScopeApi() {
-        return DashScopeApi.builder()
-                .apiKey(dashScopeApiKey)
-                .build();
-    }
-
-    /**
-     * 创建 ChatModel
-     *
-     * @param temperature 控制随机性 (0.0-1.0)
-     * @param maxToken    最大输出长度
-     * @param topP        核采样参数
-     */
-    public DashScopeChatModel createChatModel(DashScopeApi dashScopeApi, double temperature, int maxToken, double topP) {
-        return DashScopeChatModel.builder()
-                .dashScopeApi(dashScopeApi)
-                .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                        .withTemperature(temperature)
-                        .withMaxToken(maxToken)
-                        .withTopP(topP)
-                        .build())
-                .build();
-    }
-
-    /**
-     * 创建标准对话 ChatModel（默认参数）
-     */
-    public DashScopeChatModel createStandardChatModel(DashScopeApi dashScopeApi) {
-        return createChatModel(dashScopeApi, 0.7, 2000, 0.9);
-    }
 
     /**
      * 构建系统提示词（只包含人设、全局准则与记忆指针）。
@@ -188,9 +150,9 @@ public class ChatService {
     }
 
     /**
-     * 创建 ReactAgent
+     * 创建 ReactAgent（systemPrompt 因包含动态记忆内容，需每请求构建）。
      *
-     * @param chatModel    聊天模型
+     * @param chatModel    单例聊天模型
      * @param systemPrompt 系统提示词
      * @return 配置好的 ReactAgent
      */

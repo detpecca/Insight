@@ -14,8 +14,8 @@
 
 ## 🚀 核心特性
 
-- ✅ **RAG 问答**: 向量检索 + 多轮对话 + 流式输出
-- ✅ **AIOps 运维**: 智能诊断 + 多 Agent 协作 + 自动报告
+- ✅ **RAG 问答**: 向量检索 + 多轮对话 + 流式输出（统一走 Spring AI Alibaba 单路径）
+- ✅ **AIOps 运维**: 智能诊断 + 多 Agent 协作 + 自动报告（实时进度事件）
 - ✅ **工具集成**: 文档检索、告警查询、日志分析、时间工具
 - ✅ **会话管理**: 上下文维护、历史管理、自动清理
 - ✅ **Web 界面**: 提供测试界面和 RESTful API
@@ -27,8 +27,7 @@
 |------|------|------|
 | Java | 17 | 开发语言 |
 | Spring Boot | 3.2.0 | 应用框架 |
-| Spring AI / Spring AI Alibaba | 1.1.0 / 1.1.0.0-RC2 | AI Agent 框架 |
-| DashScope SDK | 2.17.0 | 阿里云 AI 服务 |
+| Spring AI / Spring AI Alibaba | 1.1.0 / 1.1.0.0-RC2 | AI Agent 框架（聊天+向量化统一入口） |
 | Milvus SDK | 2.6.10 | 向量数据库 |
 
 ## 📦 核心模块
@@ -42,11 +41,10 @@ Insight/
 │   │   └── MilvusCheckController.java # Milvus 健康检查
 │   ├── service/
 │   │   ├── ChatService.java           # 对话服务 ⭐
-│   │   ├── AiOpsService.java          # AIOps 服务 ⭐
+│   │   ├── AiOpsService.java          # AIOps 服务（流式编排）⭐
 │   │   ├── ChatSession(Service).java  # 会话管理（TTL 淘汰 + 上限）
 │   │   ├── MemoryManagerService.java  # 文件记忆系统（规则加固）
-│   │   ├── RagService.java            # RAG 服务（未接入控制器）
-│   │   └── Vector*.java               # 向量服务（批量 upsert）
+│   │   └── Vector*.java               # 向量服务（批量 upsert + 距离阈值过滤）
 │   ├── agent/tool/                    # Agent 工具集
 │   │   ├── DateTimeTools.java         # 时间工具
 │   │   ├── InternalDocsTools.java     # 文档检索
@@ -129,6 +127,8 @@ spring:
   ai:
     dashscope:
       api-key: "${DASHSCOPE_API_KEY}"
+      embedding:
+        model: text-embedding-v4
 
 # CORS 允许来源（默认仅本机开发）
 cors:
@@ -146,7 +146,7 @@ memory:
 # RAG 配置
 rag:
   top-k: 3
-  model: "qwen3-max"
+  max-l2-distance: 0   # >0 时按 L2 距离过滤，防无关文档诱导幻觉
 
 # 文档分片
 document:
@@ -216,5 +216,5 @@ curl http://localhost:9900/milvus/health
 ### 4. 运行测试
 
 ```bash
-mvn test   # 32 个单元测试：路径穿越防护、分片、会话窗口、记忆系统、报告校验
+mvn test   # 37 个单元测试：路径穿越防护、分片、会话窗口、记忆系统、报告校验、距离阈值过滤
 ```

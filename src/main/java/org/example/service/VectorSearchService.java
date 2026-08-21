@@ -7,16 +7,17 @@ import io.milvus.param.dml.SearchParam;
 import io.milvus.response.SearchResultsWrapper;
 import lombok.Getter;
 import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
 import org.example.constant.MilvusConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * 向量搜索服务
@@ -32,6 +33,14 @@ public class VectorSearchService {
 
     @Autowired
     private VectorEmbeddingService embeddingService;
+
+    /**
+     * L2 距离阈值：仅保留距离小于该值的结果（越小越严格）。
+     * 0 或负数表示不过滤（保持 topK 语义）。
+     * 启用后可避免知识库里没有相关内容时，模型仍基于无关文档作答（防幻觉）。
+     */
+    @Value("${rag.max-l2-distance:0}")
+    private double maxL2Distance;
 
     /**
      * 搜索相似文档
@@ -86,12 +95,29 @@ public class VectorSearchService {
             }
 
             logger.info("搜索完成, 找到 {} 个相似文档", results.size());
-            return results;
+            return filterByDistance(results, maxL2Distance);
 
         } catch (Exception e) {
             logger.error("搜索相似文档失败", e);
             throw new RuntimeException("搜索失败: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 按 L2 距离阈值过滤结果（L2 越小越相似）。
+     * maxDistance &lt;= 0 时不过滤。包级可见便于单元测试。
+     */
+    static List<SearchResult> filterByDistance(List<SearchResult> results, double maxDistance) {
+        if (maxDistance <= 0 || results == null || results.isEmpty()) {
+            return results == null ? Collections.emptyList() : results;
+        }
+        List<SearchResult> filtered = results.stream()
+                .filter(r -> r.getScore() < maxDistance)
+                .collect(Collectors.toList());
+        if (filtered.size() < results.size()) {
+            logger.info("距离阈值过滤: {} -> {} 条 (阈值 {})", results.size(), filtered.size(), maxDistance);
+        }
+        return filtered;
     }
 
     /**
