@@ -27,6 +27,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import jakarta.validation.Valid;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 
@@ -101,7 +102,7 @@ public class ChatController {
      * 直接返回完整结果而非流式输出
      */
     @PostMapping("/chat")
-    public ResponseEntity<ApiResponse<ChatResponse>> chat(@RequestBody ChatRequest request) {
+    public ResponseEntity<ApiResponse<ChatResponse>> chat(@Valid @RequestBody ChatRequest request) {
         String question = request.getQuestion() == null ? "" : request.getQuestion().trim();
         if (question.isEmpty()) {
             throw BusinessException.badRequest("问题内容不能为空");
@@ -142,10 +143,7 @@ public class ChatController {
      * 清空会话历史
      */
     @PostMapping("/chat/clear")
-    public ResponseEntity<ApiResponse<String>> clearChatHistory(@RequestBody ClearRequest request) {
-        if (request.getId() == null || request.getId().isEmpty()) {
-            throw BusinessException.badRequest("会话ID不能为空");
-        }
+    public ResponseEntity<ApiResponse<String>> clearChatHistory(@Valid @RequestBody ClearRequest request) {
         logger.info("收到清空会话历史请求 - SessionId: {}", request.getId());
 
         boolean cleared = chatSessionService.clearHistory(request.getId());

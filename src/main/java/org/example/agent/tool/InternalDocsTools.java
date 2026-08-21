@@ -32,15 +32,17 @@ public class InternalDocsTools {
     @Value("${rag.top-k:3}")
     private int topK = 3; // 默认值
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    /** 复用 Spring 容器的单例 ObjectMapper（重量级、线程安全，不应每类 new 一个） */
+    private final ObjectMapper objectMapper;
 
     /**
      * 构造函数注入依赖
-     * Spring 会自动注入 VectorSearchService
+     * Spring 会自动注入 VectorSearchService 和 ObjectMapper
      */
     @Autowired
-    public InternalDocsTools(VectorSearchService vectorSearchService) {
+    public InternalDocsTools(VectorSearchService vectorSearchService, ObjectMapper objectMapper) {
         this.vectorSearchService = vectorSearchService;
+        this.objectMapper = objectMapper;
     }
 
     /**

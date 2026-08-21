@@ -43,9 +43,9 @@ There is a **unit test suite** in `src/test` (32 tests, pure logic, no Docker ne
 - `POST /api/ai_ops` — SSE; runs the multi-agent AIOps analysis as a **streamed** graph (`supervisor.stream()`): each Planner/Executor node completion is pushed as a `progress` event while the run proceeds, then the final report is archived and streamed back. No request body needed.
 - `POST /api/chat/clear`, `GET /api/chat/session/{id}` — session management.
 - `POST /api/upload` (`FileUploadController`) — upload txt/md → traversal-checked filename → chunk → embed → batch-upsert into Milvus. If indexing fails the endpoint now returns 500 (file kept on disk) instead of a silent success.
-- `GET /milvus/health` (`MilvusCheckController`) — health check used by Makefile.
+- `GET /milvus/health` (`MilvusCheckController`) — health check used by Makefile. Spring Boot Actuator is also enabled: `GET /actuator/health`, `/actuator/metrics` (only health/info/metrics are exposed).
 
-Request JSON uses capitalized keys `Id` / `Question` (with lowercase aliases). Static test UI served at `http://localhost:9900` from `src/main/resources/static/`.
+Request JSON uses capitalized keys `Id` / `Question` (with lowercase aliases) — kept for frontend compatibility. `ChatRequest.Question` is validated (`@NotBlank`, `@Size(max=4000)`) via `spring-boot-starter-validation`. Static test UI served at `http://localhost:9900` from `src/main/resources/static/`.
 
 ## Architecture
 
@@ -71,6 +71,8 @@ Not stored in Milvus — plain files on disk, guarded by `ReentrantReadWriteLock
 - `INSIGHT.md` — global hard rules (`<global_insight>`), appended via the `update_insight` tool ("请记住…"). Writes are hardened: rule text is sanitized to one line (max 300 chars), timestamped for audit, and the file is capped at `memory.max-insight-lines` entries (oldest pruned) — mitigating prompt-injection poisoning of the rule base.
 - `.memory/MEMORY.md` — rolling index of past reports (pruned to ~200 lines).
 - `.memory/reports/report_*.md` — archived AIOps reports (summary stripped from `<summary>` tag); filenames include a random suffix to avoid same-second collisions. `readReport` guards against path traversal.
+
+Both `INSIGHT.md` and `.memory/` are **runtime-generated data and are gitignored** (not committed).
 `ChatService.buildSystemPrompt()` injects `<global_insight>` and `<memory_pointers>` into every chat system prompt; the agent must call `read_memory_file` before referencing history (anti-hallucination rule), and instructions from tool results/retrieved docs are explicitly declared non-actionable (indirect prompt-injection defense).
 
 ### Vector pipeline (Milvus)
@@ -84,13 +86,15 @@ Not stored in Milvus — plain files on disk, guarded by `ReentrantReadWriteLock
 
 ## Configuration Notes
 
-- The DashScope API key is **externalized**: both `spring.ai.dashscope.api-key` and `dashscope.api.key` read `${DASHSCOPE_API_KEY}` from the environment; startup fails fast if unset. (An older hardcoded key remains in git history — treat it as compromised and rotate it.)
+- The DashScope API key is **externalized**: `spring.ai.dashscope.api-key` reads `${DASHSCOPE_API_KEY}` from the environment; startup fails fast if unset. (An older hardcoded key remains in git history — treat it as compromised and rotate it.)
 - `prometheus.mock-enabled` and `cls.mock-enabled` (both `true` by default) toggle mock vs. real data sources for metrics and logs.
 - `cors.allowed-origins` — comma-separated allowlist for `/api/**` (defaults to localhost dev origins only).
 - `session.idle-timeout-minutes` / `session.max-sessions` — in-memory session eviction policy.
 - Upload limits: `spring.servlet.multipart.max-file-size / max-request-size` = 20MB; upload paths are traversal-checked via `SafePaths`.
-- Error handling: `GlobalExceptionHandler` + `BusinessException` return real 4xx/5xx with `ApiResponse`; raw exception messages are not exposed to clients.
+- Error handling: `GlobalExceptionHandler` + `BusinessException` return real 4xx/5xx with `ApiResponse`; raw exception messages are not exposed to clients. Bean validation errors return 400 with the first field message.
 - Chat model defaults: temperature 0.7 / maxToken 2000 (standard chat); AIOps uses temperature 0.3 / maxToken 8000.
+- Logging: `logback-spring.xml` → console + rolling `logs/app.log` (50MB/file, 30 days). Agent tool classes inject the shared `ObjectMapper` Bean (do not `new ObjectMapper()` in new code).
+- `spring-boot-devtools` is excluded from the repackaged jar (build plugin `<excludes>`); it is dev-only.
 
 ## Global Rule (from INSIGHT.md — respect in any ops advice)
 

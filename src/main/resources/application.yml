@@ -55,6 +55,16 @@ spring:
           initial-interval: 2000  # 初始重试间隔2秒
           multiplier: 2  # 重试间隔倍数
           max-interval: 10000  # 最大重试间隔10秒
+
+# Actuator 观测端点（健康检查/指标）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: never
     
     # Spring AI MCP 客户端配置
     # 如果使用mock数据，请注释这部分内容

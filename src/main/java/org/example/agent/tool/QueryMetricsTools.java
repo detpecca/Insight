@@ -9,6 +9,7 @@ import okhttp3.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -25,11 +26,13 @@ import java.util.*;
 public class QueryMetricsTools {
 
     private static final Logger logger = LoggerFactory.getLogger(QueryMetricsTools.class);
-    
+
     /** 工具名常量，用于动态构建提示词 */
     public static final String TOOL_QUERY_PROMETHEUS_ALERTS = "queryPrometheusAlerts";
-    
-    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /** 复用 Spring 容器的单例 ObjectMapper（重量级、线程安全，不应每类 new 一个） */
+    @Autowired
+    private ObjectMapper objectMapper;
     
     @Value("${prometheus.base-url}")
     private String prometheusBaseUrl;

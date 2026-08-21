@@ -54,3 +54,7 @@ uploads/
 ### docker
 /volumes
 /server.pid
+
+### Runtime memory (AIOps reports & global rules, generated at runtime) ###
+.memory/
+INSIGHT.md

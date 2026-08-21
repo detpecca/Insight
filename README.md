@@ -108,6 +108,11 @@ POST /api/ai_ops
 - `POST /api/upload` - 上传文件并自动向量化
 - `GET /milvus/health` - Milvus 健康检查
 
+### 5. 观测（Actuator）
+
+- `GET /actuator/health` - 标准健康检查（K8s 探针 / 监控可直接使用）
+- `GET /actuator/metrics` - JVM / HTTP 指标列表
+
 
 ## ⚙️ 核心配置
 
@@ -218,3 +223,12 @@ curl http://localhost:9900/milvus/health
 ```bash
 mvn test   # 37 个单元测试：路径穿越防护、分片、会话窗口、记忆系统、报告校验、距离阈值过滤
 ```
+
+## 📝 运行时产物
+
+以下文件由应用运行时生成，**已被 git 忽略**，不会进入版本库：
+
+- `INSIGHT.md` — 全局规则库（由 Agent 的 `update_insight` 工具写入）
+- `.memory/` — AIOps 报告归档与索引
+- `logs/` — 滚动日志（50MB/文件，保留 30 天，见 `logback-spring.xml`）
+- `uploads/` — 上传的原始文档
